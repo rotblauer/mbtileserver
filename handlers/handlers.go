@@ -146,6 +146,7 @@ type ServiceSet struct {
 // New returns a new ServiceSet. Use AddOrUpdateDBOnPath to add a mbtiles file.
 func New() *ServiceSet {
 	s := &ServiceSet{
+		busysets: make(map[string]*sync.Mutex),
 		tilesets:  make(map[string]*mbtiles.DB),
 		templates: template.New("_base_"),
 	}
