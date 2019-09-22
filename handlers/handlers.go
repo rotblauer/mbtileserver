@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -134,6 +135,7 @@ type ServiceInfo struct {
 // ServiceSet is the base type for the HTTP handlers which combines multiple
 // mbtiles.DB tilesets.
 type ServiceSet struct {
+	busysets map[string]*sync.Mutex
 	tilesets  map[string]*mbtiles.DB
 	templates *template.Template
 	Domain    string
@@ -148,6 +150,24 @@ func New() *ServiceSet {
 		templates: template.New("_base_"),
 	}
 	return s
+}
+
+func (s *ServiceSet) busy(id string) {
+	if l, ok := s.busysets[id]; ok {
+		l.Lock()
+	} else {
+		s.busysets[id] = new(sync.Mutex)
+		s.busysets[id].Lock()
+	}
+}
+
+func (s *ServiceSet) idle(id string) {
+	if l, ok := s.busysets[id]; ok {
+		l.Unlock()
+	} else {
+		s.busysets[id] = new(sync.Mutex)
+		// no l.Unlock needed since initialized mutex is already free
+	}
 }
 
 func serviceIDFromFilename(basedir, filename string) (string, error) {
@@ -174,6 +194,9 @@ func (s *ServiceSet) AddOrUpdateDBOnPath(basedir, filename string) error {
 		return fmt.Errorf("path parameter may not be empty")
 	}
 	isUpdate := false
+
+	s.busy(urlPath)
+	defer s.idle(urlPath)
 
 	// If the file exists already, then we'll remove it before adding it back again.
 	if db, ok := s.tilesets[urlPath]; ok {
@@ -203,6 +226,13 @@ func (s *ServiceSet) RemoveDBOnPath(basedir, filename string) error {
 	if urlPath == "" {
 		return fmt.Errorf("path parameter may not be empty")
 	}
+
+	s.busy(urlPath)
+	defer func() {
+		s.busysets[urlPath].Unlock()
+		delete(s.busysets, urlPath)
+	}()
+
 	err = s.tilesets[urlPath].Close()
 	if err != nil {
 		return err
@@ -289,7 +319,9 @@ func (s *ServiceSet) listServices(w http.ResponseWriter, r *http.Request) (int, 
 }
 
 func (s *ServiceSet) tileJSON(id string, db *mbtiles.DB, mapURL bool) handlerFunc {
+	s.busy(id)
 	return func(w http.ResponseWriter, r *http.Request) (int, error) {
+		defer s.idle(id)
 		query := ""
 		if r.URL.RawQuery != "" {
 			query = "?" + r.URL.RawQuery
@@ -367,7 +399,9 @@ func (s *ServiceSet) executeTemplate(w http.ResponseWriter, name string, data in
 }
 
 func (s *ServiceSet) serviceHTML(id string, db *mbtiles.DB) handlerFunc {
+	s.busy(id)
 	return func(w http.ResponseWriter, r *http.Request) (int, error) {
+		defer s.idle(id)
 		p := struct {
 			URL string
 			ID  string
@@ -454,8 +488,10 @@ func tileNotFoundHandler(w http.ResponseWriter, f mbtiles.TileFormat) (int, erro
 	return http.StatusOK, err // http.StatusOK doesn't matter, code was written by w.WriteHeader already
 }
 
-func (s *ServiceSet) tiles(db *mbtiles.DB) handlerFunc {
+func (s *ServiceSet) tiles(id string, db *mbtiles.DB) handlerFunc {
+	s.busy(id)
 	return func(w http.ResponseWriter, r *http.Request) (int, error) {
+		defer s.idle(id)
 		// split path components to extract tile coordinates x, y and z
 		pcs := strings.Split(r.URL.Path[1:], "/")
 		// we are expecting at least "services", <id> , "tiles", <z>, <x>, <y plus .ext>
@@ -524,7 +560,7 @@ func (s *ServiceSet) Handler(ef func(error), publish bool) http.Handler {
 	for id, db := range s.tilesets {
 		p := "/services/" + id
 		m.Handle(p, wrapGetWithErrors(ef, hmacAuth(s.tileJSON(id, db, publish), s.secretKey, id)))
-		m.Handle(p+"/tiles/", wrapGetWithErrors(ef, hmacAuth(s.tiles(db), s.secretKey, id)))
+		m.Handle(p+"/tiles/", wrapGetWithErrors(ef, hmacAuth(s.tiles(id, db), s.secretKey, id)))
 		if publish {
 			m.Handle(p+"/map", wrapGetWithErrors(ef, hmacAuth(s.serviceHTML(id, db), s.secretKey, id)))
 		}
