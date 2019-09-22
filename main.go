@@ -3,21 +3,21 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
+	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 
-	"net"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
-
+	"github.com/fsnotify/fsnotify"
 	"github.com/labstack/echo/v4"
 
 	"github.com/evalphobia/logrus_sentry"
@@ -245,6 +245,61 @@ func serve() {
 	e.GET("/*", h)
 	a := echo.WrapHandler(svcSet.ArcGISHandler(ef))
 	e.GET("/arcgis/rest/services/*", a)
+
+	// Watch tile path for changes and update tileset handler (db conn's too) accordingly.
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer watcher.Close()
+	go func() {
+		log.Println("watching events", tilePath)
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					log.Warnln("watcher event not ok, quitting watcher")
+					return
+				}
+				log.Println("event:", event)
+
+				if !strings.Contains(filepath.Ext(event.Name), "mbtiles") {
+					continue
+				}
+
+				if (event.Op&fsnotify.Write == fsnotify.Write) || (event.Op&fsnotify.Create == fsnotify.Create) {
+					log.Println("modified file:", event.Name)
+
+					log.Println("adding", event.Name)
+					if err := svcSet.AddOrUpdateDBOnPath(tilePath, event.Name); err != nil {
+						log.Println("error:", err)
+					}
+				}
+
+				if (event.Op&fsnotify.Remove == fsnotify.Remove) || (event.Op&fsnotify.Rename == fsnotify.Rename ) {
+					log.Println("created file:", event.Name)
+
+					log.Println("removing", event.Name)
+					if err := svcSet.RemoveDBOnPath(tilePath, event.Name); err != nil {
+						log.Println("error:", err)
+					}
+				}
+
+				h = echo.WrapHandler(svcSet.Handler(ef, true))
+				e.GET("/*", h)
+
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Println("error:", err)
+			}
+		}
+	}()
+	err = watcher.Add(tilePath)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// Start the server
 	fmt.Println("\n--------------------------------------")

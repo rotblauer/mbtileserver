@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -139,7 +140,7 @@ type ServiceSet struct {
 	secretKey string
 }
 
-// New returns a new ServiceSet. Use AddDBOnPath to add a mbtiles file.
+// New returns a new ServiceSet. Use AddOrUpdateDBOnPath to add a mbtiles file.
 func New() *ServiceSet {
 	s := &ServiceSet{
 		tilesets:  make(map[string]*mbtiles.DB),
@@ -148,20 +149,67 @@ func New() *ServiceSet {
 	return s
 }
 
-// AddDBOnPath interprets filename as mbtiles file which is opened and which will be
+func serviceIDFromFilename(basedir, filename string) (string, error) {
+	subpath, err := filepath.Rel(basedir, filename)
+	if err != nil {
+		return "", fmt.Errorf("unable to extract URL path for %q: %v", filename, err)
+	}
+	e := filepath.Ext(filename)
+	p := filepath.ToSlash(subpath)
+	id := strings.ToLower(p[:len(p)-len(e)])
+	return id, nil
+}
+
+// AddOrUpdateDBOnPath interprets filename as mbtiles file which is opened and which will be
 // served under "/services/<urlPath>" by Handler(). The parameter urlPath may not be
 // nil, otherwise an error is returned. In case the DB cannot be opened the returned
 // error is non-nil.
-func (s *ServiceSet) AddDBOnPath(filename string, urlPath string) error {
-	var err error
+func (s *ServiceSet) AddOrUpdateDBOnPath(basedir, filename string) error {
+	urlPath, err := serviceIDFromFilename(basedir, filename)
+	if err != nil {
+		return err
+	}
 	if urlPath == "" {
 		return fmt.Errorf("path parameter may not be empty")
+	}
+	isUpdate := false
+
+	// If the file exists already, then we'll remove it before adding it back again.
+	if db, ok := s.tilesets[urlPath]; ok {
+		if err := db.Close(); err != nil {
+			return err
+		}
+		isUpdate = true
 	}
 	ts, err := mbtiles.NewDB(filename)
 	if err != nil {
 		return fmt.Errorf("could not open mbtiles file %q: %v", filename, err)
 	}
 	s.tilesets[urlPath] = ts
+	if isUpdate {
+		log.Println("Updated existing DB path", filename)
+	} else {
+		log.Println("Added DB path:", filename)
+	}
+	return nil
+}
+
+func (s *ServiceSet) RemoveDBOnPath(basedir, filename string) error {
+	urlPath, err := serviceIDFromFilename(basedir, filename)
+	if err != nil {
+		return err
+	}
+	if urlPath == "" {
+		return fmt.Errorf("path parameter may not be empty")
+	}
+	err = s.tilesets[urlPath].Close()
+	if err != nil {
+		return err
+	}
+
+	delete(s.tilesets, urlPath)
+
+	log.Println("Removed DB path:", filename)
 	return nil
 }
 
@@ -191,14 +239,7 @@ func NewFromBaseDir(baseDir string, secretKey string) (*ServiceSet, error) {
 	s.secretKey = secretKey
 
 	for _, filename := range filenames {
-		subpath, err := filepath.Rel(baseDir, filename)
-		if err != nil {
-			return nil, fmt.Errorf("unable to extract URL path for %q: %v", filename, err)
-		}
-		e := filepath.Ext(filename)
-		p := filepath.ToSlash(subpath)
-		id := p[:len(p)-len(e)]
-		err = s.AddDBOnPath(filename, id)
+		err = s.AddOrUpdateDBOnPath(baseDir, filename)
 		if err != nil {
 			return nil, err
 		}
