@@ -135,7 +135,7 @@ type ServiceInfo struct {
 // ServiceSet is the base type for the HTTP handlers which combines multiple
 // mbtiles.DB tilesets.
 type ServiceSet struct {
-	busysets map[string]*sync.Mutex
+	busysets  map[string]*sync.Mutex
 	tilesets  map[string]*mbtiles.DB
 	templates *template.Template
 	Domain    string
@@ -146,7 +146,7 @@ type ServiceSet struct {
 // New returns a new ServiceSet. Use AddOrUpdateDBOnPath to add a mbtiles file.
 func New() *ServiceSet {
 	s := &ServiceSet{
-		busysets: make(map[string]*sync.Mutex),
+		busysets:  make(map[string]*sync.Mutex),
 		tilesets:  make(map[string]*mbtiles.DB),
 		templates: template.New("_base_"),
 	}
@@ -321,8 +321,8 @@ func (s *ServiceSet) listServices(w http.ResponseWriter, r *http.Request) (int, 
 
 func (s *ServiceSet) tileJSON(id string, db *mbtiles.DB, mapURL bool) handlerFunc {
 	s.busy(id)
+	defer s.idle(id)
 	return func(w http.ResponseWriter, r *http.Request) (int, error) {
-		defer s.idle(id)
 		query := ""
 		if r.URL.RawQuery != "" {
 			query = "?" + r.URL.RawQuery
@@ -401,8 +401,8 @@ func (s *ServiceSet) executeTemplate(w http.ResponseWriter, name string, data in
 
 func (s *ServiceSet) serviceHTML(id string, db *mbtiles.DB) handlerFunc {
 	s.busy(id)
+	defer s.idle(id)
 	return func(w http.ResponseWriter, r *http.Request) (int, error) {
-		defer s.idle(id)
 		p := struct {
 			URL string
 			ID  string
@@ -491,8 +491,8 @@ func tileNotFoundHandler(w http.ResponseWriter, f mbtiles.TileFormat) (int, erro
 
 func (s *ServiceSet) tiles(id string, db *mbtiles.DB) handlerFunc {
 	s.busy(id)
+	defer s.idle(id)
 	return func(w http.ResponseWriter, r *http.Request) (int, error) {
-		defer s.idle(id)
 		// split path components to extract tile coordinates x, y and z
 		pcs := strings.Split(r.URL.Path[1:], "/")
 		// we are expecting at least "services", <id> , "tiles", <z>, <x>, <y plus .ext>
